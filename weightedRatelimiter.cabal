@@ -16,6 +16,7 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Lib
+  ghc-options: -O2 -W
   build-depends:       base >= 4.7 && < 5
                      , time-units == 1.0.0
                      , time >= 1.6.0.1 && < 1.6.1
