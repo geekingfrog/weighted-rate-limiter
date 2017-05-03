@@ -1,10 +1,10 @@
 module Lib
-    ( RateLimiter
-    , simpleLimiter
-    , burstyLimiter
-    , smoothWarmupLimiter
-    , acquire
-    ) where
+  ( RateLimiter
+  , simpleLimiter
+  , burstyLimiter
+  , smoothWarmupLimiter
+  , acquire
+  ) where
 
 import Data.Time.Units
 import Control.Concurrent.MVar
@@ -12,6 +12,7 @@ import Control.Concurrent
 import qualified System.Clock as Clock
 
 type Permit = Double
+
 type LimiterState = (Permit, Microsecond) -- storedPermits, nextFreeTicket
 
 data RateLimiter = RateLimiter
@@ -21,11 +22,14 @@ data RateLimiter = RateLimiter
     , rlState :: MVar LimiterState
     }
 
-simpleLimiter :: TimeUnit a => a -> IO RateLimiter
+simpleLimiter
+    :: TimeUnit a
+    => a -> IO RateLimiter
 simpleLimiter interval = burstyLimiter interval 0
 
-
-smoothWarmupLimiter :: (TimeUnit a, TimeUnit b) => a -> Permit -> b -> Double -> IO RateLimiter
+smoothWarmupLimiter
+    :: (TimeUnit a, TimeUnit b)
+    => a -> Permit -> b -> Double -> IO RateLimiter
 smoothWarmupLimiter stableInterval threshold warmupPeriod coldFactor = do
     let stableMicro = convertUnit stableInterval
     let warmupMicro = convertUnit warmupPeriod :: Microsecond
@@ -33,14 +37,17 @@ smoothWarmupLimiter stableInterval threshold warmupPeriod coldFactor = do
     let maxPermits = threshold + 2 * toDouble warmupMicro / toDouble (stableMicro + coldInterval)
     let slope = toDouble (coldInterval - stableMicro) / (maxPermits - threshold)
     state <- newMVar (0, 0)
-    pure RateLimiter
+    pure
+        RateLimiter
         { rlMaxPermits = maxPermits
         , rlInterval = stableMicro
         , rlStoredPermitsToWaitTime = storedPermitsToWaitTimeSmooth slope stableMicro threshold
         , rlState = state
         }
 
-burstyLimiter :: TimeUnit a => a -> Permit -> IO RateLimiter
+burstyLimiter
+    :: TimeUnit a
+    => a -> Permit -> IO RateLimiter
 burstyLimiter interval maxBurst = do
     state <- newMVar (0, 0)
     pure
@@ -72,7 +79,6 @@ acquire limiter permitsToTake = do
         Just wait -> threadDelay (fromInteger $ toMicroseconds wait)
     pure mbWaitTime
 
-
 reserve :: RateLimiter -> LimiterState -> Microsecond -> Permit -> LimiterState
 reserve limiter (storedPermits, nextFreeTicket) now requiredPermits =
     let storedPermitsToSpend = max 0 (storedPermits - requiredPermits)
@@ -91,13 +97,13 @@ reserve limiter (storedPermits, nextFreeTicket) now requiredPermits =
         nextStopredPermits = max 0 (storedPermits' - requiredPermits)
     in (nextStopredPermits, nextFreeTicket')
 
-
-toDouble :: TimeUnit a => a -> Double
+toDouble
+    :: TimeUnit a
+    => a -> Double
 toDouble = fromIntegral . toMicroseconds
 
 fromDouble :: Double -> Microsecond
 fromDouble = fromMicroseconds . round
-
 
 getCurrentTimeMicro :: IO Microsecond
 getCurrentTimeMicro = do
@@ -106,18 +112,14 @@ getCurrentTimeMicro = do
     let micro = truncate $ fromIntegral (Clock.nsec t) / 1000
     pure $ fromMicroseconds (s + micro)
 
-
 storedPermitsToWaitTimeSmooth :: Double -> Microsecond -> Permit -> Permit -> Microsecond
 storedPermitsToWaitTimeSmooth slope stableInterval thresholdPermits requiredPermits =
     fromDouble $ timeAboveThreshold + timeBelowThreshold
   where
     permitsAboveThresholdToTake = max 0 (requiredPermits - thresholdPermits)
     permitsBelowThresholdToTake = max 0 (requiredPermits - permitsAboveThresholdToTake)
-
     timeAboveThreshold = permitsAboveThresholdToTake * (slope / 2 + toDouble stableInterval)
     timeBelowThreshold = fromIntegral stableInterval * permitsBelowThresholdToTake
-
-
 
 testLog msg = do
     t <- Clock.getTime Clock.Realtime
@@ -133,8 +135,6 @@ testSimple = do
     testLog "yo 5"
     acquire lim 1 >>= print
     testLog "yo 6"
-
-
 -- acquire (BurstyLimiter (interval, maxPermits, mState)) requiredPermits = do
 --     mbWaitTime <- modifyMVar mState $ \state -> do
 --         now <- getCurrentTimeMicro
@@ -153,8 +153,6 @@ testSimple = do
 --     case mbWaitTime of
 --         Nothing -> pure ()
 --         Just timeToWait -> threadDelay (fromIntegral $ toMicroseconds timeToWait)
-
-
 -- data RateLimiter
 --     = BurstyLimiter LimiterParams (MVar LimiterState)
 --     | SmoothWarmupLimiter LimiterParams SmoothWarmupParams (MVar LimiterState)
