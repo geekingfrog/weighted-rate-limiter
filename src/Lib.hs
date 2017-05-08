@@ -137,8 +137,10 @@ storedPermitsToWaitTimeSmooth slope stableInterval thresholdPermits storedPermit
   where
     (permitsAboveThresholdToTake, permitsBelowThresholdToTake)
         | storedPermits <= thresholdPermits = (0, requiredPermits)
-        | storedPermits > thresholdPermits && requiredPermits <= (storedPermits - thresholdPermits) = (requiredPermits, 0)
-        | otherwise = (storedPermits - thresholdPermits, requiredPermits - (storedPermits - thresholdPermits))
+        | requiredPermits <= (storedPermits - thresholdPermits) = (requiredPermits, 0)
+        | otherwise =
+            let x = storedPermits - thresholdPermits
+            in (x, requiredPermits - x)
     timeAboveThreshold = permitsAboveThresholdToTake * (slope / 2 + toDouble stableInterval)
     timeBelowThreshold = fromIntegral stableInterval * permitsBelowThresholdToTake
 
