@@ -10,15 +10,17 @@ import Data.Time.Units
 import Control.Concurrent.MVar
 import Control.Concurrent
 import qualified System.Clock as Clock
+import Debug.Trace as T
+import Data.Maybe (fromMaybe)
 
 type Permit = Double
 
-type LimiterState = (Permit, Microsecond) -- storedPermits, nextFreeTicket
+type LimiterState = (Permit, Maybe Microsecond) -- storedPermits, nextFreeTicket
 
 data RateLimiter = RateLimiter
     { rlMaxPermits :: !Permit
     , rlInterval :: !Microsecond
-    , rlStoredPermitsToWaitTime :: Permit -> Microsecond
+    , rlStoredPermitsToWaitTime :: Permit -> Permit -> Microsecond
     , rlState :: MVar LimiterState
     }
 
@@ -27,34 +29,39 @@ simpleLimiter
     => a -> IO RateLimiter
 simpleLimiter interval = burstyLimiter interval 0
 
+burstyLimiter
+    :: TimeUnit a
+    => a -> Permit -> IO RateLimiter
+burstyLimiter interval maxBurst = do
+    state <- newMVar (maxBurst, Nothing)
+    pure
+        RateLimiter
+        { rlMaxPermits = maxBurst
+        , rlInterval = convertUnit interval
+        , rlStoredPermitsToWaitTime = \_ _ -> 0
+        , rlState = state
+        }
+
 smoothWarmupLimiter
     :: (TimeUnit a, TimeUnit b)
     => a -> Permit -> b -> Double -> IO RateLimiter
 smoothWarmupLimiter stableInterval threshold warmupPeriod coldFactor = do
     let stableMicro = convertUnit stableInterval
     let warmupMicro = convertUnit warmupPeriod :: Microsecond
-    let coldInterval = fromDouble (toDouble stableMicro * coldFactor)
-    let maxPermits = threshold + 2 * toDouble warmupMicro / toDouble (stableMicro + coldInterval)
-    let slope = toDouble (coldInterval - stableMicro) / (maxPermits - threshold)
-    state <- newMVar (0, 0)
+    let coldInterval = toDouble stableMicro * coldFactor
+    let maxPermits = threshold + 2 * toDouble warmupMicro / (toDouble stableMicro + coldInterval)
+    let slope = (coldInterval - toDouble stableMicro) / (maxPermits - threshold)
+    state <- newMVar (maxPermits, Nothing)
+    -- putStrLn $ "cold interval:" ++ show coldInterval
+    -- putStrLn $ "stable micro: " ++ show stableMicro
+    -- putStrLn $ "diff: " ++ show (coldInterval - toDouble stableMicro)
+    -- putStrLn $ "maxPermits:" ++ show maxPermits
+    -- putStrLn $ "slope:" ++ show slope
     pure
         RateLimiter
         { rlMaxPermits = maxPermits
         , rlInterval = stableMicro
         , rlStoredPermitsToWaitTime = storedPermitsToWaitTimeSmooth slope stableMicro threshold
-        , rlState = state
-        }
-
-burstyLimiter
-    :: TimeUnit a
-    => a -> Permit -> IO RateLimiter
-burstyLimiter interval maxBurst = do
-    state <- newMVar (0, 0)
-    pure
-        RateLimiter
-        { rlMaxPermits = maxBurst
-        , rlInterval = convertUnit interval
-        , rlStoredPermitsToWaitTime = const 0
         , rlState = state
         }
 
@@ -66,36 +73,48 @@ acquire limiter permitsToTake = do
             putStrLn $ "    State: " ++ show st
             now <- getCurrentTimeMicro
             -- putStrLn $ "nextFree: " ++ show nextFreeTicket ++ " - now: " ++ show now
-            -- putStrLn $ "diff: " ++ show (nextFreeTicket > now)
+            -- putStrLn $ "diff: " ++ show (nextFreeTicket - now) ++ " comp: " ++ show (nextFreeTicket > now)
             let nextState = reserve limiter st now (fromIntegral permitsToTake)
             putStrLn $ "nextState: " ++ show nextState
-            let wait =
-                    if nextFreeTicket > now
-                        then Just (nextFreeTicket - now)
-                        else Nothing
+            let wait = case nextFreeTicket of
+                    Nothing -> Nothing
+                    Just nextFreeTicket | nextFreeTicket <= now -> Nothing
+                    Just nextFreeTicket -> Just (nextFreeTicket - now)
+                    -- if nextFreeTicket > now
+                    --     then Just (nextFreeTicket - now)
+                    --     else Nothing
             pure (nextState, wait)
     case mbWaitTime of
         Nothing -> pure ()
         Just wait -> threadDelay (fromInteger $ toMicroseconds wait)
+        -- Just wait -> do
+        --     putStrLn $ "waiting " ++ show (fromInteger $ toMicroseconds wait)
+        --     threadDelay (fromInteger $ toMicroseconds wait)
     pure mbWaitTime
 
 reserve :: RateLimiter -> LimiterState -> Microsecond -> Permit -> LimiterState
-reserve limiter (storedPermits, nextFreeTicket) now requiredPermits =
-    let storedPermitsToSpend = max 0 (storedPermits - requiredPermits)
+reserve limiter (storedPermits, mbNextFreeTicket) now requiredPermits =
+    let storedPermitsToSpend =
+            if storedPermits >= requiredPermits
+                then requiredPermits
+                else storedPermits
         freshPermits = requiredPermits - storedPermitsToSpend
         freshWait = freshPermits * toDouble (rlInterval limiter)
-        storedWait = rlStoredPermitsToWaitTime limiter storedPermitsToSpend
+        storedWait = rlStoredPermitsToWaitTime limiter storedPermits storedPermitsToSpend
+        nextFreeTicket = fromMaybe now mbNextFreeTicket
         nextFreeTicket' =
-            max nextFreeTicket (now + fromMicroseconds (round $ freshWait + toDouble storedWait))
+            max nextFreeTicket now + fromMicroseconds (round $ freshWait + toDouble storedWait)
         storedPermits' =
             if nextFreeTicket > now
-                then storedPermits
+                then storedPermits - storedPermitsToSpend
                 else min
                          (rlMaxPermits limiter)
-                         (storedPermits +
+                         (storedPermits - storedPermitsToSpend +
                           toDouble (now - nextFreeTicket) / toDouble (rlInterval limiter))
-        nextStopredPermits = max 0 (storedPermits' - requiredPermits)
-    in (nextStopredPermits, nextFreeTicket')
+        nextStoredPermits = storedPermits' -- max 0 storedPermits'
+        debug = "storedPermitsToSpend = " ++ show storedPermitsToSpend ++ "\nrequiredPermits " ++ show requiredPermits ++ "\nstoredPermits: " ++ show storedPermits ++ "\nfreshWait: " ++ show freshWait ++ "\nstoredWait: " ++ show storedWait ++ "\nnextStoredPermits: " ++ show nextStoredPermits ++ "\ndelta: " ++ show (nextFreeTicket' - now)
+    -- in T.trace debug (nextStoredPermits, Just nextFreeTicket')
+    in (nextStoredPermits, Just nextFreeTicket')
 
 toDouble
     :: TimeUnit a
@@ -112,29 +131,50 @@ getCurrentTimeMicro = do
     let micro = truncate $ fromIntegral (Clock.nsec t) / 1000
     pure $ fromMicroseconds (s + micro)
 
-storedPermitsToWaitTimeSmooth :: Double -> Microsecond -> Permit -> Permit -> Microsecond
-storedPermitsToWaitTimeSmooth slope stableInterval thresholdPermits requiredPermits =
+storedPermitsToWaitTimeSmooth :: Double -> Microsecond -> Permit -> Permit -> Permit -> Microsecond
+storedPermitsToWaitTimeSmooth slope stableInterval thresholdPermits storedPermits requiredPermits =
     fromDouble $ timeAboveThreshold + timeBelowThreshold
   where
-    permitsAboveThresholdToTake = max 0 (requiredPermits - thresholdPermits)
-    permitsBelowThresholdToTake = max 0 (requiredPermits - permitsAboveThresholdToTake)
+    (permitsAboveThresholdToTake, permitsBelowThresholdToTake)
+        | storedPermits <= thresholdPermits = (0, requiredPermits)
+        | storedPermits > thresholdPermits && requiredPermits <= (storedPermits - thresholdPermits) = (requiredPermits, 0)
+        | otherwise = (storedPermits - thresholdPermits, requiredPermits - (storedPermits - thresholdPermits))
     timeAboveThreshold = permitsAboveThresholdToTake * (slope / 2 + toDouble stableInterval)
     timeBelowThreshold = fromIntegral stableInterval * permitsBelowThresholdToTake
 
 testLog msg = do
     t <- Clock.getTime Clock.Realtime
-    putStrLn $ show (Clock.sec t) ++ " - " ++ msg
+    putStrLn $ show (Clock.sec t) ++ " - " ++ show (Clock.nsec t) ++ " - " ++ msg
 
 testSimple = do
     lim <- simpleLimiter (1 :: Second)
-    testLog "yo 0"
-    acquire lim 1 >>= print
-    acquire lim 1 >>= print
-    testLog "yo 2"
-    acquire lim 3 >>= print
-    testLog "yo 5"
-    acquire lim 1 >>= print
-    testLog "yo 6"
+    loop lim
+  where
+    loop lim = do
+        acquire lim 1
+        testLog "yo"
+        loop lim
+
+testBursty = do
+    lim <- burstyLimiter (1 :: Second) 2
+    loop lim
+  where
+    loop lim = do
+        acquire lim 1
+        testLog "yo bursty"
+        loop lim
+
+testSmooth = do
+    lim <- smoothWarmupLimiter (1 :: Second) 3 (1 :: Second) 2
+    loop lim
+    pure ()
+  where
+    loop lim = do
+        acquire lim 1
+        testLog "yo smooth"
+        loop lim
+
+
 -- acquire (BurstyLimiter (interval, maxPermits, mState)) requiredPermits = do
 --     mbWaitTime <- modifyMVar mState $ \state -> do
 --         now <- getCurrentTimeMicro
